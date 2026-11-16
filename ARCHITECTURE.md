@@ -1,78 +1,60 @@
 # How RenzBase works
 
-The short version: a DLL gets smuggled into Roblox, and once inside it
-talks Lua back to you over a named pipe.
+One process. The exe is the window, the injector and the payload.
 
-## The 3 pieces
+## The pieces
 
-### `Module.dll` (the brain)
+### `RenzBase.exe`
 
-This is the part that actually does stuff. It's a regular Windows DLL
-written in C++ that, once loaded into Roblox, does three things:
+A Tauri app. `ui/src` is the window (plain HTML, CSS and JS, no bundler, no CDN).
+`ui/src-tauri/src/lib.rs` is everything else:
 
-1. **Finds Roblox's Lua state** in memory. Roblox has a global Lua
-   interpreter; the DLL locates it by reading known offsets (like
-   `TaskScheduler` → `ScriptContext` → `main_thread`).
+1. **Finds Roblox.** Walks the process list for `RobloxPlayerBeta.exe`.
+2. **Writes the payload.** `Module.dll` is `include_bytes!`-ed into the binary at
+   compile time, so there is no DLL to ship beside the exe. It is written to
+   `%TEMP%\RenzBase\Module_<timestamp>.dll`.
+3. **Loads it in Roblox.** `OpenProcess` → `VirtualAllocEx` → `WriteProcessMemory`
+   → `CreateRemoteThread(LoadLibraryW)` → wait for the thread → check its exit
+   code, which is the loaded module handle.
+4. **Talks to it.** Scripts go over `\\.\pipe\RenzBase` as raw UTF-8 bytes.
 
-2. **Registers Lua functions** into Roblox's environment. Stuff like
-   `writefile`, `readfile`, `crypt.hash`, `firetouchinterest`,
-   `identifyexecutor`, etc. Roblox doesn't ship these; the DLL adds them.
+### `Module.dll` (the payload)
 
-3. **Listens for scripts** on a named pipe (`\\.\pipe\RenzBase`). When a
-   script arrives, the DLL runs it through `luaL_loadstring` then
-   `luau_execute`, and the output shows up in F9.
+Compiled from `dll/` by MSBuild, then baked into the exe. Once inside Roblox:
 
-### `Loader.exe` (the door)
+1. Finds the Lua state by reading the offsets in `dll/Source/Roblox/Offsets/`
+   (`TaskScheduler` → `ScriptContext` → `main_thread`).
+2. Registers the executor functions: `writefile`, `readfile`, `crypt.hash`,
+   `firetouchinterest`, `identifyexecutor`, and the rest.
+3. Runs a pipe thread: `CreateNamedPipeA("\\.\pipe\RenzBase")`, then
+   `luaL_loadstring` + `luau_execute` on whatever arrives.
 
-Just opens Roblox's process and uses `CreateRemoteThread` +
-`LoadLibraryA` to inject Module.dll. That's the textbook way to inject
-a DLL, and it works *unless* Roblox's Hyperion security catches it.
-
-## The flow when you run a script
+## The flow when you press Run
 
 ```
-you                send_script.py              Loader.exe
- │                      │                          │
- │  python send_script  │                          │
- │ ───────────────────► │                          │
- │                      │  open named pipe         │
- │                      │ ─────────────────────►   │
- │                      │      write Lua source    │
- │                      │ ─────────────────────►   │
- │                      │                          │
-                                            Module.dll (in Roblox)
-                                                   │
-                                       luaL_loadstring(src)
-                                                   │
-                                          luau_execute(L)
-                                                   │
-                                          output → F9
-                                                   ▼
+RenzBase.exe                 Module.dll (inside Roblox)
+     │                                    │
+     │  CreateFileW \\.\pipe\RenzBase     │
+     │ ─────────────────────────────────► │
+     │  WriteFile(lua source)             │
+     │ ─────────────────────────────────► │
+     │                          luaL_loadstring(src)
+     │                          luau_execute(L)
+     │                                    │
+     │                          output → F9 console
 ```
 
 ## Why the offsets matter
 
-Roblox keeps changing its binary. Every update moves functions around in
-memory. We have a hardcoded list of "where things are" addresses in
-`dll/Source/Roblox/Offsets/Offsets.h`. When Roblox updates:
-
-1. Someone dumps the new binary
-2. They find where Print/LuauExecute/etc ended up
-3. They update Offsets.h
-4. We rebuild the DLL
-
-Right now we use offsets from `roblox-dumper 3.6` for Roblox version
-`e7d81637d42c4b23`. Last verified working Sep 2 2026.
+Roblox moves functions around every update. The addresses live in
+`dll/Source/Roblox/Offsets/Offsets.h` and were dumped for build
+`e7d81637d42c4b23`. `scripts/update_offsets.py` refreshes them from a new dump.
+Rebuilding the exe with the old offsets gives you a fresh binary that injects
+into the wrong addresses, so a Roblox patch means: dump, refresh, rebuild.
 
 ## Hyperion
 
-Roblox's anti-cheat. It sits between your DLL and the game's Lua state
-and blocks anything that looks fishy. To get past it without a bypass:
-
-- **Potassium** does the bypass externally (its own driver).
-- We don't bundle a bypass because every public one gets detected
-  within weeks.
-
-If you want this DLL to load without Potassium, you need a Hyperion
-emulator (like the user built earlier — `Hyperspace`) and you have to
-plug it in here.
+Roblox's anti-cheat sees `CreateRemoteThread` + `LoadLibraryW`. Public bypasses
+(driver-level ones like Potassium) get detected within weeks, so this repo does
+not bundle one. If a build injects and runs nothing, the offsets are the first
+thing to check, not the loader.

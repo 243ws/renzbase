@@ -7,96 +7,69 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div id="app">
-      <!-- Title bar -->
-      <header class="titlebar">
-        <div class="titlebar-left">
-          <span class="brand">RenzBase</span>
-          <span class="brand-sub">— executor</span>
+    <div class="app">
+      <nav class="rail" aria-label="Sections">
+        <div class="rail-top">
+          <button class="rail-btn is-active" data-view="home" title="Home" aria-label="Home">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 6-6 6 6 6"/><path d="m16 6 6 6-6 6"/></svg>
+          </button>
+          <button class="rail-btn" data-view="library" title="Library" aria-label="Library">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2Z"/><path d="M8 7h7"/></svg>
+          </button>
+          <button class="rail-btn" data-view="clients" title="Clients" aria-label="Clients">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg>
+          </button>
         </div>
-        <div class="titlebar-right">
-          <span id="attach-status" class="status-pill status-detached">no client</span>
-        </div>
-      </header>
-
-      <!-- Tabs row -->
-      <nav class="tabs" id="tabs">
-        <div class="tabs-list" id="tabs-list"></div>
-        <div class="tabs-actions">
-          <button class="tab-btn" id="tab-new" title="New tab">+</button>
+        <div class="rail-bottom">
+          <button class="rail-btn" data-view="settings" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 0 1-2-2 2 2 0 0 1 2-2 1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 5.6V5.4A2 2 0 0 1 11 3.4a2 2 0 0 1 2 2v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 20.4 12a2 2 0 0 1 2 2 2 2 0 0 1-2 2Z"/></svg>
+          </button>
         </div>
       </nav>
 
-      <!-- Main 2-column area: sidebar | editor -->
-      <main class="main">
-        <aside class="sidebar">
-          <div class="sidebar-header">
-            <input
-              id="script-filter"
-              type="text"
-              class="filter-input"
-              placeholder="Filter scripts..."
-              spellcheck="false"
-              autocomplete="off"
-            />
-          </div>
-          <div class="sidebar-section-header">
-            <span>Scripts</span>
-            <button id="new-script-btn" class="mini-btn" title="New script">+</button>
-          </div>
-          <div class="sidebar-tree" id="sidebar-tree"></div>
-          <div class="sidebar-footer">
-            <span class="hint">Place scripts in</span>
-            <code>%APPDATA%\RenzBase\scripts</code>
-          </div>
-        </aside>
+      <aside class="explorer">
+        <div class="explorer-head">
+          <span>Explorer</span>
+          <button class="icon-btn" id="new-script" title="New script" aria-label="New script">+</button>
+        </div>
+        <div class="search-wrap">
+          <input id="search" class="search" type="text" placeholder="Search files..." spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="tree" id="tree"></div>
+        <div class="explorer-foot">
+          <button class="link-btn" id="open-folder">scripts folder</button>
+        </div>
+      </aside>
 
-        <section class="editor-pane">
-          <div id="monaco-host" class="monaco-host"></div>
-          <div class="editor-toolbar">
-            <button id="attach-btn" class="primary-btn">Attach</button>
-            <button id="execute-btn" class="primary-btn accent">Execute</button>
-            <button id="save-btn" class="secondary-btn">Save</button>
-            <span class="grow"></span>
-            <span id="active-tab-name" class="active-tab-name"></span>
-          </div>
-        </section>
+      <main class="main">
+        <div class="tabbar">
+          <div class="tabs" id="tabs"></div>
+          <button class="launch" id="launch"><span class="launch-dot" aria-hidden="true"></span>Launch</button>
+        </div>
+        <div class="toolbar">
+          <button class="tool" id="run" title="Run the active script (Ctrl+Enter)">Run</button>
+          <button class="tool" id="clear-console" title="Clear the console">Clear</button>
+          <span class="tool-sep" aria-hidden="true"></span>
+          <button class="tool" id="open-file" title="Open a .lua file">Open</button>
+          <button class="tool" id="save" title="Save the active script (Ctrl+S)">Save</button>
+          <button class="tool" id="copy" title="Copy the active script">Copy</button>
+          <span class="tool-sep" aria-hidden="true"></span>
+          <button class="tool" id="snippets" title="The library folder">Snippets</button>
+          <button class="tool" id="attach" title="Attach to the running client">Clients</button>
+          <span class="toolbar-grow"></span>
+          <span class="clients" id="clients">no client</span>
+        </div>
+        <section class="content" id="content"></section>
       </main>
 
-      <!-- Console panel -->
-      <section class="console" id="console-panel">
-        <div class="console-header">
-          <span>Console</span>
-          <button id="console-clear" class="mini-btn">clear</button>
-        </div>
-        <div class="console-body" id="console-body"></div>
-      </section>
-
-      <!-- Status bar -->
       <footer class="statusbar">
-        <span id="status-text">ready</span>
+        <span id="status-left">ready</span>
         <span class="grow"></span>
         <span id="status-right"></span>
       </footer>
     </div>
 
-    <!-- Monaco loader -->
-    <script>
-      // Configure AMD loader BEFORE Monaco loads.
-      window.MonacoEnvironment = {
-        getWorkerUrl: function (moduleId, label) {
-          const baseUrl = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
-          return (
-            'data:text/javascript;charset=utf-8,' +
-            encodeURIComponent(
-              `self.MonacoEnvironment = { baseUrl: '${baseUrl}/' };` +
-              `importScripts('${baseUrl}/base/worker/workerMain.js');`
-            )
-          );
-        },
-      };
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+    <div class="toast-stack" id="toasts" aria-live="polite"></div>
     <script src="main.js"></script>
   </body>
 </html>

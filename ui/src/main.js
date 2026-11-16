@@ -1,413 +1,712 @@
-// RenzBase UI - frontend wiring
+// RenzBase - frontend. Talks to the Rust side through window.__TAURI__.core.invoke.
 //
-// Responsibilities:
-//   - load Monaco from CDN (text/plain language; Luau highlighting TBD)
-//   - tabs: array of {id, name, content, dirty, path?}
-//   - sidebar: tree fetched from Rust `list_scripts`
-//   - attach: call Rust `spawn_injector`
-//   - execute: call Rust `execute_script` with current editor content
-//   - save: call Rust `save_script` to persist into %APPDATA%\RenzBase\scripts
-//   - console: stream Rust "console" events into the bottom panel
+// Backend commands: client_status, inject, execute_script, list_scripts,
+// read_script, save_script, save_to_path, workspace_path, open_path,
+// launch_roblox.
 
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+const invoke = window.__TAURI__.core.invoke;
 
-// ---------- state ----------
 const state = {
-  tabs: [],                // [{id, name, content, dirty, path?}]
-  activeTabId: null,
-  nextTabId: 1,
-  scripts: [],             // ScriptEntry[]
-  filter: '',
+  tabs: [{ id: "home", kind: "home", title: "Home", closable: false }],
+  activeId: "home",
+  nextId: 1,
+  scripts: [],
+  filter: "",
+  log: [],
+  status: { running: false, pid: 0, attached: false },
+  workspace: "",
+  settings: { autoExec: true },
+  recent: [],
 };
 
-let editor = null;
+const el = (id) => document.getElementById(id);
 
-// ---------- helpers ----------
-function uid() {
-  return `t${state.nextTabId++}`;
+/* ------------------------------------------------------------- utilities */
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function activeTab() {
-  return state.tabs.find((t) => t.id === state.activeTabId) || null;
+function baseName(path) {
+  const parts = String(path).split(/[\\/]/);
+  return parts[parts.length - 1] || path;
 }
 
-function log(level, msg) {
-  const body = document.getElementById('console-body');
+function loadprefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("renzbase.prefs") || "{}");
+    if (typeof saved.autoExec === "boolean") state.settings.autoExec = saved.autoExec;
+    if (Array.isArray(saved.recent)) state.recent = saved.recent.slice(0, 6);
+  } catch {
+    /* first run */
+  }
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem(
+      "renzbase.prefs",
+      JSON.stringify({ autoExec: state.settings.autoExec, recent: state.recent.slice(0, 6) })
+    );
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function toast(message, level = "") {
+  const node = document.createElement("div");
+  node.className = `toast ${level}`;
+  node.textContent = message;
+  el("toasts").appendChild(node);
+  setTimeout(() => {
+    node.style.opacity = "0";
+    node.style.transition = "opacity .2s ease";
+    setTimeout(() => node.remove(), 220);
+  }, level === "error" ? 6500 : 3800);
+}
+
+function logLine(message, level = "") {
+  const stamp = new Date().toLocaleTimeString([], { hour12: false });
+  state.log.push({ stamp, message, level });
+  if (state.log.length > 400) state.log.splice(0, state.log.length - 400);
+  const body = el("console-body");
   if (!body) return;
-  const line = document.createElement('div');
+  const line = document.createElement("div");
   line.className = `console-line ${level}`;
-  const ts = new Date().toLocaleTimeString([], { hour12: false });
-  line.innerHTML = `<span class="ts">[${ts}]</span>${escapeHtml(msg)}`;
+  line.innerHTML = `<span class="stamp">${stamp}</span>${escapeHtml(message)}`;
   body.appendChild(line);
   body.scrollTop = body.scrollHeight;
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+function setStatus(left, right) {
+  if (left !== undefined) el("status-left").textContent = left;
+  if (right !== undefined) el("status-right").textContent = right;
 }
 
-function setStatus(text) {
-  const el = document.getElementById('status-text');
-  if (el) el.textContent = text;
+/* ------------------------------------------------------------------ tabs */
+
+function activeTab() {
+  return state.tabs.find((tab) => tab.id === state.activeId) || state.tabs[0];
 }
 
-// ---------- tabs ----------
-function renderTabs() {
-  const list = document.getElementById('tabs-list');
-  list.innerHTML = '';
-  for (const tab of state.tabs) {
-    const el = document.createElement('div');
-    el.className = `tab ${tab.id === state.activeTabId ? 'active' : ''} ${tab.dirty ? 'dirty' : ''}`;
-    el.title = tab.path || tab.name;
-
-    const name = document.createElement('span');
-    name.className = 'tab-name';
-    name.textContent = tab.name;
-    el.appendChild(name);
-
-    const close = document.createElement('button');
-    close.className = 'tab-close';
-    close.textContent = '×';
-    close.title = 'Close';
-    close.addEventListener('click', (e) => {
-      e.stopPropagation();
-      closeTab(tab.id);
-    });
-    el.appendChild(close);
-
-    el.addEventListener('click', () => activateTab(tab.id));
-    list.appendChild(el);
+function openTab(tab) {
+  const existing = state.tabs.find((item) => item.kind === tab.kind && item.path && item.path === tab.path);
+  if (existing) {
+    state.activeId = existing.id;
+  } else {
+    state.tabs.push(tab);
+    state.activeId = tab.id;
   }
-  const activeName = document.getElementById('active-tab-name');
-  const a = activeTab();
-  if (activeName) activeName.textContent = a ? (a.path || a.name) : '';
+  render();
 }
 
-function addTab(name = 'untitled', content = '', path = null) {
-  const tab = { id: uid(), name, content, dirty: false, path };
-  state.tabs.push(tab);
-  activateTab(tab.id);
-  return tab;
-}
-
-function activateTab(id) {
-  // flush current editor value into old active tab
-  const cur = activeTab();
-  if (cur && editor) cur.content = editor.getValue();
-
-  state.activeTabId = id;
-  const tab = activeTab();
-  if (editor && tab) {
-    editor.setValue(tab.content || '');
-    editor.focus();
-  }
-  renderTabs();
+function newScriptTab() {
+  const id = `t${state.nextId++}`;
+  openTab({ id, kind: "script", title: `untitled-${state.nextId - 1}.lua`, path: null, content: "", dirty: false, closable: true });
+  el("code")?.focus();
 }
 
 function closeTab(id) {
-  const idx = state.tabs.findIndex((t) => t.id === id);
-  if (idx < 0) return;
-  const wasActive = state.activeTabId === id;
-  state.tabs.splice(idx, 1);
-  if (state.tabs.length === 0) {
-    // always keep at least one tab
-    addTab('Start', '-- welcome to RenzBase\nprint("hello skid works")\n');
-    return;
+  const index = state.tabs.findIndex((tab) => tab.id === id);
+  if (index === -1) return;
+  state.tabs.splice(index, 1);
+  if (state.activeId === id) {
+    state.activeId = state.tabs[Math.max(0, index - 1)]?.id || "home";
   }
-  if (wasActive) {
-    const next = state.tabs[Math.min(idx, state.tabs.length - 1)];
-    activateTab(next.id);
-  } else {
-    renderTabs();
-  }
+  render();
 }
 
-// ---------- editor ----------
-function initEditor() {
-  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
-
-  require(['vs/editor/editor.main'], () => {
-    // Register a minimal "luau" language so .luau files don't error.
-    if (!monaco.languages.getLanguages().some((l) => l.id === 'luau')) {
-      monaco.languages.register({ id: 'luau' });
-      monaco.languages.setMonarchTokensProvider('luau', {
-        tokenizer: {
-          root: [
-            [/--\[\[[\s\S]*?\]\]/, 'comment'],
-            [/--.*$/, 'comment'],
-            [/\b(local|function|end|if|then|else|elseif|for|while|do|return|true|false|nil|and|or|not|in|repeat|until|break)\b/, 'keyword'],
-            [/\b(print|require|tonumber|tostring|type|pcall|xpcall|table|string|math|game|workspace|script)\b/, 'type'],
-            [/"([^"\\]|\\.)*"/, 'string'],
-            [/'([^'\\]|\\.)*'/, 'string'],
-            [/\d+(\.\d+)?/, 'number'],
-            [/--.*$/, 'comment'],
-            [/[a-zA-Z_][a-zA-Z0-9_]*/, 'identifier'],
-            [/[{}()\[\]]/, 'delimiter'],
-            [/[+\-*/%=<>~^#]/, 'operator'],
-          ],
-        },
-      });
-    }
-
-    editor = monaco.editor.create(document.getElementById('monaco-host'), {
-      value: '-- welcome to RenzBase\nprint("hello skid works")\n',
-      language: 'plaintext',
-      theme: 'vs-dark',
-      automaticLayout: true,
-      minimap: { enabled: false },
-      fontSize: 13,
-      fontFamily: 'Consolas, Menlo, monospace',
-      scrollBeyondLastLine: false,
-      renderWhitespace: 'selection',
-      tabSize: 2,
-    });
-
-    editor.onDidChangeModelContent(() => {
-      const t = activeTab();
-      if (t && editor.getValue() !== t.content) {
-        t.content = editor.getValue();
-        // mark dirty only if content differs from disk snapshot
-        if (!t.savedSnapshot || t.content !== t.savedSnapshot) {
-          if (!t.dirty) {
-            t.dirty = true;
-            renderTabs();
-          }
-        } else if (t.dirty) {
-          t.dirty = false;
-          renderTabs();
-        }
-      }
-    });
-
-    // Default tab now that editor exists.
-    if (state.tabs.length === 0) {
-      addTab('Start', '-- welcome to RenzBase\nprint("hello skid works")\n');
-    } else {
-      const t = activeTab();
-      if (t && editor) editor.setValue(t.content);
-    }
-  });
+function openFixed(kind, title) {
+  openTab({ id: kind, kind, title, closable: false });
 }
 
-// ---------- sidebar ----------
-function renderSidebar() {
-  const tree = document.getElementById('sidebar-tree');
-  tree.innerHTML = '';
-
-  const filter = state.filter.trim().toLowerCase();
-  const matches = (name) => !filter || name.toLowerCase().includes(filter);
-
-  const filtered = state.scripts
-    .map((entry) => filterEntry(entry, matches))
-    .filter(Boolean);
-
-  if (filtered.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'tree-empty';
-    empty.textContent = 'no scripts yet — create one with the + button';
-    tree.appendChild(empty);
-    return;
-  }
-
-  for (const entry of filtered) {
-    tree.appendChild(renderNode(entry, 0));
-  }
-}
-
-function filterEntry(entry, matches) {
-  if (entry.is_folder) {
-    const kids = entry.children.map((c) => filterEntry(c, matches)).filter(Boolean);
-    if (kids.length === 0 && !matches(entry.name)) return null;
-    return { ...entry, children: kids };
-  }
-  if (!matches(entry.name)) return null;
-  return entry;
-}
-
-function renderNode(entry, depth) {
-  const wrap = document.createElement('div');
-
-  const row = document.createElement('div');
-  row.className = `tree-node ${entry.is_folder ? 'folder' : 'file'} ${entry.is_autoexecute ? 'autoexecute' : ''}`;
-  row.style.paddingLeft = `${6 + depth * 12}px`;
-
-  const twisty = document.createElement('span');
-  twisty.className = 'twisty';
-  twisty.textContent = entry.is_folder ? '▾' : '';
-  row.appendChild(twisty);
-
-  const icon = document.createElement('span');
-  icon.className = 'icon';
-  icon.textContent = entry.is_folder ? '▣' : '▤';
-  row.appendChild(icon);
-
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = entry.name;
-  row.appendChild(name);
-
-  row.addEventListener('click', () => {
-    if (entry.is_folder) return;
-    openScript(entry);
-    document.querySelectorAll('.tree-node.selected').forEach((n) => n.classList.remove('selected'));
-    row.classList.add('selected');
-  });
-
-  wrap.appendChild(row);
-
-  if (entry.is_folder && entry.children.length > 0) {
-    const kids = document.createElement('div');
-    kids.className = 'tree-children';
-    for (const c of entry.children) {
-      kids.appendChild(renderNode(c, depth + 1));
-    }
-    wrap.appendChild(kids);
-  }
-
-  return wrap;
-}
-
-function openScript(entry) {
-  // load file content via fetch on file://? Not allowed in Tauri. Use a Rust command.
-  // For now we trust that sidebar entries are leaf files; the Rust side reads them
-  // through the save_script path. We'll add a `read_script` command if needed.
-  // For the skeleton, we just open a tab and let the user paste/save.
-  const tab = addTab(entry.name, `-- loaded: ${entry.name}\nprint("from ${entry.name}")\n`, entry.path);
-  tab.savedSnapshot = tab.content;
-  tab.dirty = false;
+function markDirty(tab) {
+  tab.dirty = true;
   renderTabs();
 }
 
-async function refreshScripts() {
-  try {
-    const list = await invoke('list_scripts');
-    state.scripts = list || [];
-    renderSidebar();
-  } catch (e) {
-    log('error', `list_scripts failed: ${e}`);
+/* ------------------------------------------------------------------ tree */
+
+function groupFromEntries() {
+  const folders = state.scripts.filter((entry) => entry.folder);
+  const rootFiles = state.scripts.filter((entry) => !entry.folder);
+  const groups = [];
+
+  const library = folders.find((entry) => entry.name.toLowerCase() === "library");
+  groups.push({ name: "Library", entries: library ? library.children : [] });
+
+  groups.push({ name: "Scripts", entries: rootFiles });
+
+  for (const folder of folders) {
+    if (folder.name.toLowerCase() === "library") continue;
+    groups.push({ name: folder.name, entries: folder.children });
+  }
+  return groups;
+}
+
+function renderTree() {
+  const tree = el("tree");
+  if (!tree) return;
+  const query = state.filter.trim().toLowerCase();
+  const groups = groupFromEntries();
+  tree.innerHTML = "";
+
+  for (const group of groups) {
+    const entries = query
+      ? group.entries.filter((entry) => entry.name.toLowerCase().includes(query))
+      : group.entries;
+
+    if (query && entries.length === 0 && !group.name.toLowerCase().includes(query)) continue;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "tree-group";
+
+    const title = document.createElement("button");
+    title.className = "tree-group-title";
+    title.innerHTML = `<svg class="caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg><span>${escapeHtml(group.name)}</span>`;
+    title.addEventListener("click", () => wrapper.classList.toggle("collapsed"));
+    wrapper.appendChild(title);
+
+    const items = document.createElement("div");
+    items.className = "tree-items";
+
+    if (entries.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "tree-empty";
+      empty.textContent = query ? "No match" : "No scripts yet";
+      items.appendChild(empty);
+    } else {
+      for (const entry of entries) {
+        const button = document.createElement("button");
+        button.className = "tree-item";
+        if (activeTab().path === entry.path) button.classList.add("is-active");
+        button.innerHTML = `<span class="dot" aria-hidden="true"></span><span>${escapeHtml(entry.name.replace(/\.(lua|luau|txt)$/i, ""))}</span>`;
+        button.title = entry.path;
+        button.addEventListener("click", () => openScript(entry));
+        items.appendChild(button);
+      }
+    }
+
+    wrapper.appendChild(items);
+    tree.appendChild(wrapper);
   }
 }
 
-// ---------- actions ----------
+async function refreshTree() {
+  try {
+    state.scripts = await invoke("list_scripts");
+  } catch (error) {
+    state.scripts = [];
+    logLine(`list_scripts: ${error}`, "error");
+  }
+  renderTree();
+}
+
+async function openScript(entry) {
+  try {
+    const content = await invoke("read_script", { path: entry.path });
+    openTab({
+      id: `t${state.nextId++}`,
+      kind: "script",
+      title: entry.name,
+      path: entry.path,
+      content,
+      dirty: false,
+      closable: true,
+    });
+    remember(entry.path);
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+function remember(path) {
+  state.recent = [path, ...state.recent.filter((item) => item !== path)].slice(0, 6);
+  savePrefs();
+  if (activeTab().kind === "home") render();
+}
+
+/* ------------------------------------------------------------------ tabs render */
+
+function renderTabs() {
+  const host = el("tabs");
+  host.innerHTML = "";
+  for (const tab of state.tabs) {
+    const node = document.createElement("div");
+    node.className = `tab${tab.id === state.activeId ? " is-active" : ""}${tab.dirty ? " is-dirty" : ""}`;
+    node.title = tab.path || tab.title;
+    node.innerHTML = `<span class="tab-name">${escapeHtml(tab.title.replace(/\.(lua|luau)$/i, ""))}</span>`;
+    node.addEventListener("click", () => {
+      state.activeId = tab.id;
+      render();
+    });
+    if (tab.closable) {
+      const close = document.createElement("button");
+      close.className = "tab-x";
+      close.textContent = "×";
+      close.setAttribute("aria-label", `Close ${tab.title}`);
+      close.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeTab(tab.id);
+      });
+      node.appendChild(close);
+    }
+    host.appendChild(node);
+  }
+}
+
+/* ------------------------------------------------------------------ views */
+
+function homeView() {
+  const { attached, running } = state.status;
+  const statusText = attached ? "1 connected" : running ? "client found, not attached" : "no client";
+  const recent = state.recent.length
+    ? state.recent
+        .map(
+          (path) =>
+            `<button class="row" data-open="${escapeHtml(path)}"><span class="row-name">${escapeHtml(baseName(path))}</span><span class="row-meta">recent</span></button>`
+        )
+        .join("")
+    : `<div class="row-empty">Nothing opened yet</div>`;
+
+  return `
+    <div class="home">
+      <div class="home-top">
+        <div class="brand-big">
+          <div class="mark">R</div>
+          <h1>Welcome to RenzBase</h1>
+        </div>
+        <div class="status-card">
+          <span class="dot" aria-hidden="true" style="width:7px;height:7px;border-radius:50%;background:${attached ? "var(--ok)" : "var(--dim)"}"></span>
+          <div>
+            <div class="label">CLIENT STATUS</div>
+            <div class="value">${escapeHtml(statusText)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cards">
+        <button class="card" data-action="new"><h2>New script</h2><p>Start with a blank file.</p><span class="glyph">{ }</span></button>
+        <button class="card" data-action="library"><h2>Script Hub</h2><p>Browse the library folder.</p><span class="glyph">◇</span></button>
+        <button class="card" data-action="launch"><h2>Launch Roblox</h2><p>Start the client, then attach.</p><span class="glyph">▸</span></button>
+        <button class="card" data-action="settings"><h2>Settings</h2><p>Workspace and auto execute.</p><span class="glyph">◎</span></button>
+      </div>
+
+      <div class="home-lists">
+        <div>
+          <div class="list-title">QUICK ACTIONS</div>
+          <button class="row" data-action="folder"><span class="row-name">Open scripts folder…</span><span class="row-meta">Ctrl+O</span></button>
+          <button class="row" data-action="attach"><span class="row-name">Attach to Roblox</span><span class="row-meta">Launch</span></button>
+        </div>
+        <div>
+          <div class="list-title">RECENT</div>
+          ${recent}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function editorView(tab) {
+  const lines = tab.content.split("\n").length;
+  const gutter = Array.from({ length: Math.max(lines, 1) }, (_, index) => index + 1).join("\n");
+  const consoleHtml = state.log
+    .map(
+      (entry) =>
+        `<div class="console-line ${entry.level}"><span class="stamp">${entry.stamp}</span>${escapeHtml(entry.message)}</div>`
+    )
+    .join("");
+
+  return `
+    <div class="editor">
+      <div class="editor-body">
+        <div class="gutter" id="gutter">${gutter}</div>
+        <textarea id="code" class="code" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off">${escapeHtml(tab.content)}</textarea>
+      </div>
+      <div class="console">
+        <div class="console-head"><span>CONSOLE</span></div>
+        <div class="console-body" id="console-body">${consoleHtml}</div>
+      </div>
+    </div>
+  `;
+}
+
+function libraryView() {
+  const library = state.scripts.find((entry) => entry.folder && entry.name.toLowerCase() === "library");
+  const entries = library ? library.children : [];
+  const rows = entries.length
+    ? entries
+        .map(
+          (entry) =>
+            `<button class="row" data-open="${escapeHtml(entry.path)}"><span class="row-name">${escapeHtml(entry.name)}</span><span class="row-meta">open</span></button>`
+        )
+        .join("")
+    : `<div class="row-empty">The Library folder is empty</div>`;
+
+  return `
+    <div class="page">
+      <h1>Library</h1>
+      <p class="sub">Files in <code>%APPDATA%\\RenzBase\\scripts\\Library</code>. Open one, paste its loadstring, press Run.</p>
+      ${rows}
+    </div>
+  `;
+}
+
+function clientsView() {
+  const { running, pid, attached, payloadBytes } = state.status;
+  const statePill = attached
+    ? `<span class="pill ok"><span class="dot" aria-hidden="true"></span>attached</span>`
+    : running
+      ? `<span class="pill bad"><span class="dot" aria-hidden="true"></span>not attached</span>`
+      : `<span class="pill"><span class="dot" aria-hidden="true"></span>closed</span>`;
+
+  return `
+    <div class="page">
+      <h1>Clients</h1>
+      <p class="sub">One exe does everything: it holds the window, the injector and the payload.</p>
+      <div class="setting">
+        <div>
+          <div class="setting-name">Roblox client</div>
+          <div class="setting-note">${running ? `RobloxPlayerBeta.exe, pid ${pid}` : "Roblox is not running"}</div>
+        </div>
+        ${statePill}
+      </div>
+      <div class="setting">
+        <div>
+          <div class="setting-name">Embedded payload</div>
+          <div class="setting-note">Module.dll inside this exe, ${(payloadBytes / 1024).toFixed(0)} KB</div>
+        </div>
+        <button class="tool" data-action="attach">Attach</button>
+      </div>
+      <div class="setting">
+        <div>
+          <div class="setting-name">Start Roblox</div>
+          <div class="setting-note">Opens the client app; join a game, then attach.</div>
+        </div>
+        <button class="tool" data-action="launch">Launch Roblox</button>
+      </div>
+    </div>
+  `;
+}
+
+function settingsView() {
+  return `
+    <div class="page">
+      <h1>Settings</h1>
+      <p class="sub">Stored on this PC, in <code>${escapeHtml(state.workspace || "%APPDATA%\\RenzBase\\scripts")}</code></p>
+      <div class="setting">
+        <div>
+          <div class="setting-name">Run AutoExecute on attach</div>
+          <div class="setting-note">Every .lua in the AutoExecute folder runs when the client attaches.</div>
+        </div>
+        <button class="switch${state.settings.autoExec ? " is-on" : ""}" data-action="toggle-autoexec" aria-pressed="${state.settings.autoExec}" aria-label="Run AutoExecute on attach"></button>
+      </div>
+      <div class="setting">
+        <div>
+          <div class="setting-name">Scripts folder</div>
+          <div class="setting-note">${escapeHtml(state.workspace)}</div>
+        </div>
+        <button class="tool" data-action="folder">Open</button>
+      </div>
+      <div class="setting">
+        <div>
+          <div class="setting-name">RenzBase</div>
+          <div class="setting-note">Single-executable build. Payload offsets come from dll/Source/Roblox/Offsets.</div>
+        </div>
+        <span class="pill">v0.2.0</span>
+      </div>
+    </div>
+  `;
+}
+
+/* ------------------------------------------------------------------ render */
+
+function render() {
+  const tab = activeTab();
+  renderTabs();
+
+  const content = el("content");
+  if (tab.kind === "home") content.innerHTML = homeView();
+  else if (tab.kind === "library") content.innerHTML = libraryView();
+  else if (tab.kind === "clients") content.innerHTML = clientsView();
+  else if (tab.kind === "settings") content.innerHTML = settingsView();
+  else content.innerHTML = editorView(tab);
+
+  const code = el("code");
+  if (code) {
+    code.addEventListener("input", () => {
+      tab.content = code.value;
+      const gutter = el("gutter");
+      const lines = code.value.split("\n").length;
+      if (gutter) gutter.textContent = Array.from({ length: Math.max(lines, 1) }, (_, index) => index + 1).join("\n");
+      if (!tab.dirty) markDirty(tab);
+    });
+    code.addEventListener("scroll", () => {
+      const gutter = el("gutter");
+      if (gutter) gutter.scrollTop = code.scrollTop;
+    });
+    code.addEventListener("keydown", (event) => {
+      if (event.key === "Tab") {
+        event.preventDefault();
+        const start = code.selectionStart;
+        code.setRangeText("    ", start, code.selectionEnd, "end");
+        code.dispatchEvent(new Event("input"));
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        runActive();
+      }
+    });
+    const body = el("console-body");
+    if (body) body.scrollTop = body.scrollHeight;
+  }
+
+  for (const button of document.querySelectorAll(".rail-btn")) {
+    button.classList.toggle("is-active", button.dataset.view === tab.kind);
+  }
+
+  renderTree();
+  updateToolbar();
+}
+
+function updateToolbar() {
+  const tab = activeTab();
+  const isScript = tab.kind === "script";
+  for (const id of ["run", "save", "copy", "clear-console"]) {
+    const button = el(id);
+    if (button) button.disabled = !isScript;
+  }
+  const attached = state.status.attached;
+  el("launch").classList.toggle("is-attached", attached);
+  el("clients").textContent = attached
+    ? "1 connected"
+    : state.status.running
+      ? "client found"
+      : "no client";
+  setStatus(
+    attached ? "attached" : state.status.running ? "client running, not attached" : "ready",
+    state.workspace ? "RenzBase 0.2.0" : ""
+  );
+}
+
+/* ------------------------------------------------------------------ actions */
+
+async function refreshStatus() {
+  try {
+    state.status = await invoke("client_status");
+  } catch {
+    state.status = { running: false, pid: 0, attached: false, payloadBytes: 0 };
+  }
+  const signature = `${state.status.running}:${state.status.attached}:${state.status.pid}`;
+  const changed = signature !== state.statusSignature;
+  state.statusSignature = signature;
+  updateToolbar();
+  if (changed && (activeTab().kind === "home" || activeTab().kind === "clients")) {
+    const content = el("content");
+    if (content) {
+      content.innerHTML = activeTab().kind === "home" ? homeView() : clientsView();
+    }
+  }
+}
+
 async function attach() {
-  const btn = document.getElementById('attach-btn');
-  btn.disabled = true;
-  setStatus('attaching...');
+  const button = el("launch");
+  button.disabled = true;
+  setStatus("attaching…");
   try {
-    await invoke('spawn_injector');
-    document.getElementById('attach-status').textContent = '1 client attached';
-    document.getElementById('attach-status').className = 'status-pill status-attached';
-    setStatus('attached');
-    document.getElementById('status-right').textContent = 'no errors';
-  } catch (e) {
-    log('error', `attach failed: ${e}`);
-    setStatus('attach failed');
+    const status = await invoke("inject");
+    state.status = status;
+    toast("Attached. Press Run to execute.", "ok");
+    logLine("attached to RobloxPlayerBeta.exe", "ok");
+    if (state.settings.autoExec) await runAutoExecute();
+  } catch (error) {
+    toast(String(error), "error");
+    logLine(String(error), "error");
   } finally {
-    btn.disabled = false;
+    button.disabled = false;
+    refreshStatus();
   }
 }
 
-async function executeCurrent() {
-  if (!editor) return;
-  const script = editor.getValue();
-  if (!script.trim()) {
-    log('dim', 'nothing to execute');
+async function runAutoExecute() {
+  const folder = state.scripts.find((entry) => entry.folder && entry.name.toLowerCase() === "autoexecute");
+  if (!folder || folder.children.length === 0) return;
+  for (const entry of folder.children) {
+    try {
+      const content = await invoke("read_script", { path: entry.path });
+      await invoke("execute_script", { script: content });
+      logLine(`autoexec ${entry.name}`, "ok");
+    } catch (error) {
+      logLine(`autoexec ${entry.name}: ${error}`, "error");
+    }
+  }
+}
+
+async function runActive() {
+  const tab = activeTab();
+  if (tab.kind !== "script") return;
+  try {
+    const bytes = await invoke("execute_script", { script: tab.content });
+    logLine(`ran ${tab.title} (${bytes} bytes)`, "ok");
+    setStatus("script sent");
+  } catch (error) {
+    toast(String(error), "error");
+    logLine(String(error), "error");
+  }
+}
+
+async function saveActive() {
+  const tab = activeTab();
+  if (tab.kind !== "script") return;
+  try {
+    let path = tab.path;
+    if (path) {
+      await invoke("save_to_path", { path, content: tab.content });
+    } else {
+      let name = tab.title;
+      try {
+        const answer = window.prompt("Save as (name in the scripts folder):", tab.title);
+        if (answer) name = answer;
+      } catch {
+        /* no prompt in this webview: fall back to the tab title */
+      }
+      path = await invoke("save_script", { name, content: tab.content });
+      tab.path = path;
+      tab.title = baseName(path);
+      remember(path);
+    }
+    tab.dirty = false;
+    toast(`Saved ${baseName(path)}`, "ok");
+    await refreshTree();
+    renderTabs();
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+async function copyActive() {
+  const tab = activeTab();
+  if (tab.kind !== "script") return;
+  try {
+    await navigator.clipboard.writeText(tab.content);
+    toast("Copied to the clipboard", "ok");
+  } catch {
+    toast("The clipboard is not available", "error");
+  }
+}
+
+async function openFolder() {
+  try {
+    await invoke("open_path", { path: state.workspace });
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+async function startRoblox() {
+  try {
+    await invoke("launch_roblox");
+    toast("Roblox is starting. Join a game, then press Launch.", "ok");
+    setTimeout(refreshStatus, 4000);
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+async function handleAction(action) {
+  if (action === "new") newScriptTab();
+  if (action === "library") openFixed("library", "Library");
+  if (action === "settings") openFixed("settings", "Settings");
+  if (action === "clients") openFixed("clients", "Clients");
+  if (action === "attach") attach();
+  if (action === "launch") startRoblox();
+  if (action === "folder") openFolder();
+  if (action === "toggle-autoexec") {
+    state.settings.autoExec = !state.settings.autoExec;
+    savePrefs();
+    render();
+  }
+}
+
+/* ------------------------------------------------------------------ wiring */
+
+document.addEventListener("click", (event) => {
+  const actionNode = event.target.closest("[data-action]");
+  if (actionNode) {
+    handleAction(actionNode.dataset.action);
     return;
   }
-  log('dim', `executing ${script.length} chars...`);
-  try {
-    await invoke('execute_script', { script });
-    log('success', 'script sent to pipe');
-  } catch (e) {
-    log('error', `execute failed: ${e}`);
+  const openNode = event.target.closest("[data-open]");
+  if (openNode) {
+    const path = openNode.dataset.open;
+    const entry = { name: baseName(path), path };
+    openScript(entry);
   }
-}
+});
 
-async function saveCurrent() {
-  const tab = activeTab();
-  if (!tab || !editor) return;
-  let name = tab.name;
-  if (!name.endsWith('.luau') && !name.endsWith('.lua')) name += '.luau';
-  try {
-    const content = editor.getValue();
-    const path = await invoke('save_script', { name, content });
-    tab.name = name;
-    tab.path = path;
-    tab.savedSnapshot = content;
-    tab.dirty = false;
-    renderTabs();
-    await refreshScripts();
-    log('success', `saved ${name}`);
-  } catch (e) {
-    log('error', `save failed: ${e}`);
-  }
-}
-
-async function newScript() {
-  const name = window.prompt('New script name (e.g. foo.luau):', 'untitled.luau');
-  if (!name) return;
-  let n = name.trim();
-  if (!n) return;
-  if (!n.endsWith('.luau') && !n.endsWith('.lua')) n += '.luau';
-  try {
-    const path = await invoke('save_script', { name: n, content: '-- new script\n' });
-    await refreshScripts();
-    addTab(n, '-- new script\n', path).savedSnapshot = '-- new script\n';
-    renderTabs();
-    log('success', `created ${n}`);
-  } catch (e) {
-    log('error', `new script failed: ${e}`);
-  }
-}
-
-// ---------- wire up ----------
-window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('tab-new').addEventListener('click', () => addTab('untitled', ''));
-  document.getElementById('new-script-btn').addEventListener('click', newScript);
-  document.getElementById('attach-btn').addEventListener('click', attach);
-  document.getElementById('execute-btn').addEventListener('click', executeCurrent);
-  document.getElementById('save-btn').addEventListener('click', saveCurrent);
-  document.getElementById('console-clear').addEventListener('click', () => {
-    document.getElementById('console-body').innerHTML = '';
-  });
-
-  document.getElementById('script-filter').addEventListener('input', (e) => {
-    state.filter = e.target.value;
-    renderSidebar();
-  });
-
-  // Ctrl+S to save, Ctrl+Enter to execute
-  window.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      saveCurrent();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      executeCurrent();
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
-      e.preventDefault();
-      addTab('untitled', '');
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
-      e.preventDefault();
-      const t = activeTab();
-      if (t) closeTab(t.id);
+for (const button of document.querySelectorAll(".rail-btn")) {
+  button.addEventListener("click", () => {
+    const view = button.dataset.view;
+    if (view === "home") {
+      state.activeId = "home";
+      render();
+    } else {
+      openFixed(view, view.charAt(0).toUpperCase() + view.slice(1));
     }
   });
+}
 
-  // Console event stream from Rust.
-  listen('console', (event) => {
-    const msg = String(event.payload || '');
-    if (msg.startsWith('[error]')) log('error', msg.replace(/^\[error\]\s*/, ''));
-    else if (msg.startsWith('[ok]')) log('success', msg.replace(/^\[ok\]\s*/, ''));
-    else log('dim', msg);
-  });
-
-  initEditor();
-  refreshScripts();
-  log('dim', 'RenzBase UI ready');
-  setStatus('ready');
+el("new-script").addEventListener("click", newScriptTab);
+el("open-folder").addEventListener("click", openFolder);
+el("launch").addEventListener("click", attach);
+el("attach").addEventListener("click", attach);
+el("run").addEventListener("click", runActive);
+el("save").addEventListener("click", saveActive);
+el("copy").addEventListener("click", copyActive);
+el("snippets").addEventListener("click", () => handleAction("library"));
+el("open-file").addEventListener("click", openFolder);
+el("clear-console").addEventListener("click", () => {
+  state.log = [];
+  const body = el("console-body");
+  if (body) body.innerHTML = "";
 });
+el("search").addEventListener("input", (event) => {
+  state.filter = event.target.value;
+  renderTree();
+});
+
+document.addEventListener("keydown", (event) => {
+  const modifier = event.ctrlKey || event.metaKey;
+  if (!modifier) return;
+  if (event.key === "s") {
+    event.preventDefault();
+    saveActive();
+  }
+  if (event.key === "o") {
+    event.preventDefault();
+    openFolder();
+  }
+  if (event.key === "n" && event.shiftKey) {
+    event.preventDefault();
+    newScriptTab();
+  }
+});
+
+/* ------------------------------------------------------------------ boot */
+
+(async function boot() {
+  loadprefs();
+  try {
+    state.workspace = await invoke("workspace_path");
+  } catch {
+    state.workspace = "%APPDATA%\\RenzBase\\scripts";
+  }
+  await refreshTree();
+  await refreshStatus();
+  render();
+  setInterval(refreshStatus, 2500);
+})();

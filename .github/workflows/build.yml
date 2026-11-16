@@ -1,5 +1,8 @@
 name: build-exe
 
+# One exe, built in GitHub: the DLL is compiled, baked into the Tauri binary as
+# bytes, and the artifact is a single RenzBase.exe. Nothing else ships.
+
 on:
   push:
     branches: [main]
@@ -18,22 +21,30 @@ jobs:
         shell: cmd
         run: msbuild dll\SkidBase.vcxproj -p:Configuration=Release -p:Platform=x64 -m -v:minimal
 
-      - name: Build Injector.exe
+      - name: Embed the payload in the app
         shell: cmd
-        run: msbuild injector\Injector.vcxproj -p:Configuration=Release -p:Platform=x64 -m -v:minimal
+        run: |
+          if not exist ui\src-tauri\assets mkdir ui\src-tauri\assets
+          copy /Y dll\Release\Module.dll ui\src-tauri\assets\Module.dll
+          dir ui\src-tauri\assets
 
-      - name: Collect the exe and the dll
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the single exe
+        working-directory: ui/src-tauri
+        run: cargo build --release --features custom-protocol
+
+      - name: Collect RenzBase.exe
         shell: cmd
         run: |
           mkdir out
-          copy dll\Release\Module.dll out\
-          copy injector\Build\Injector.exe out\
-          copy Release\Loader.exe out\
-          copy scripts\send_script.py out\
+          copy ui\src-tauri\target\release\renzbase-ui.exe out\RenzBase.exe
+          dir out
 
-      - name: Upload exe and dll
+      - name: Upload the exe
         uses: actions/upload-artifact@v4
         with:
-          name: renzbase-win64
-          path: out/*
+          name: RenzBase-win64
+          path: out/RenzBase.exe
           if-no-files-found: error
