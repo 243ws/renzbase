@@ -8,7 +8,7 @@
   --line-soft: #1c1c1f;
   --text: #e9e9ec;
   --muted: #8b8b92;
-  --dim: #616168;
+  --dim: #7b7b84;
   --ok: #3ddc97;
   --warn: #f0b429;
   --bad: #f26d72;
@@ -468,7 +468,7 @@ input { font: inherit; }
 
 .console-line.ok { color: var(--ok); }
 .console-line.error { color: var(--bad); }
-.console-line .stamp { color: #4d4d54; margin-right: 8px; }
+.console-line .stamp { color: #6f6f78; margin-right: 8px; }
 
 /* -------------------------------------------------------- library/settings */
 

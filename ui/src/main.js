@@ -94,7 +94,9 @@ function activeTab() {
 }
 
 function openTab(tab) {
-  const existing = state.tabs.find((item) => item.kind === tab.kind && item.path && item.path === tab.path);
+  const existing = state.tabs.find(
+    (item) => item.id === tab.id || (item.kind === tab.kind && item.path && item.path === tab.path)
+  );
   if (existing) {
     state.activeId = existing.id;
   } else {
