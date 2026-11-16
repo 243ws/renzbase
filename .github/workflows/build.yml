@@ -1,0 +1,39 @@
+name: build-exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Module.dll
+        shell: cmd
+        run: msbuild dll\SkidBase.vcxproj -p:Configuration=Release -p:Platform=x64 -m -v:minimal
+
+      - name: Build Injector.exe
+        shell: cmd
+        run: msbuild injector\Injector.vcxproj -p:Configuration=Release -p:Platform=x64 -m -v:minimal
+
+      - name: Collect the exe and the dll
+        shell: cmd
+        run: |
+          mkdir out
+          copy dll\Release\Module.dll out\
+          copy injector\Build\Injector.exe out\
+          copy Release\Loader.exe out\
+          copy scripts\send_script.py out\
+
+      - name: Upload exe and dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: renzbase-win64
+          path: out/*
+          if-no-files-found: error
