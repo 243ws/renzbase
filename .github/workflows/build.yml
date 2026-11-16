@@ -28,6 +28,24 @@ jobs:
           copy /Y dll\Release\Module.dll ui\src-tauri\assets\Module.dll
           dir ui\src-tauri\assets
 
+      - name: Make sure the window icon exists
+        shell: powershell
+        run: |
+          $ico = "ui\src-tauri\icons\icon.ico"
+          if (-not (Test-Path $ico)) {
+            Add-Type -AssemblyName System.Drawing
+            $png = [System.Drawing.Image]::FromFile((Resolve-Path "ui\src-tauri\icons\icon.png"))
+            $bmp = New-Object System.Drawing.Bitmap(64, 64)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.DrawImage($png, 0, 0, 64, 64)
+            $g.Dispose()
+            $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+            $fs = [System.IO.File]::Create((Join-Path (Get-Location) $ico))
+            $icon.Save($fs)
+            $fs.Close()
+            Write-Host "generated $ico"
+          } else { Write-Host "icon.ico present" }
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
